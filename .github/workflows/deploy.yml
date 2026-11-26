@@ -24,6 +24,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Garante que js/palavras.js corresponde a biblioteca.json e aceitas.txt,
+      # mesmo que alguém tenha esquecido de rodar "npm run palavras".
+      - name: Gerar lista de palavras
+        run: node ferramentas/gerar-palavras.mjs
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 

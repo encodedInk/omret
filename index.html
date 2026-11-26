@@ -39,7 +39,7 @@
         <span class="switch-trilho" aria-hidden="true"><span class="switch-bola"></span></span>
         <span class="switch-rotulo" aria-hidden="true">prática</span>
       </button>
-      <button type="button" class="acao" id="btnNovo" title="Nova rodada" aria-label="Nova rodada">
+      <button type="button" class="acao" id="btnNovo" title="Jogar prática" aria-label="Jogar prática">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v6h-6"/></svg>
       </button>
       <button type="button" class="acao" id="btnAjuda" title="Como jogar" aria-label="Como jogar">
@@ -55,10 +55,10 @@
     </div>
   </header>
 
-  <nav class="modos" role="tablist" aria-label="Modalidades">
-    <button type="button" class="modo" role="tab" data-modo="termo" aria-selected="true">termo</button>
-    <button type="button" class="modo" role="tab" data-modo="dueto" aria-selected="false">dueto</button>
-    <button type="button" class="modo" role="tab" data-modo="quarteto" aria-selected="false">quarteto</button>
+  <nav class="modos" aria-label="Modalidades">
+    <button type="button" class="modo" data-modo="termo" aria-pressed="true">termo</button>
+    <button type="button" class="modo" data-modo="dueto" aria-pressed="false">dueto</button>
+    <button type="button" class="modo" data-modo="quarteto" aria-pressed="false">quarteto</button>
   </nav>
 
   <main id="jogo">
@@ -86,6 +86,7 @@
   <div class="teclado" id="teclado" aria-label="Teclado do jogo"></div>
 
   <div class="aviso" id="aviso" role="status" aria-live="polite"></div>
+  <p class="sr-only" id="anuncio" aria-live="polite"></p>
 
   <dialog class="modal" id="dlgAjuda" aria-labelledby="tituloAjuda">
     <div class="modal-topo">
@@ -132,9 +133,10 @@
       <ul class="regras">
         <li><strong>Acentos e cedilha são preenchidos automaticamente</strong> e não contam nas dicas: <em>açude</em> vale como <em>acude</em>.</li>
         <li>As palavras podem ter letras repetidas.</li>
-        <li>No <strong>diário</strong>, uma palavra <strong>nunca é sorteada duas vezes na mesma modalidade</strong> — nem dentro de uma rodada, nem nas rodadas seguintes, até a biblioteca dar a volta.</li>
+        <li>O <strong>diário</strong> é o mesmo para todo mundo e uma palavra <strong>nunca se repete na mesma modalidade</strong> até a lista de respostas dar a volta.</li>
+        <li>Você não pode repetir um palpite que já fez.</li>
         <li>No <strong>modo prática</strong>, a mesma palavra só pode voltar a ser sorteada depois de <strong>90 dias</strong>. Dentro de uma mesma prática não há repetição.</li>
-        <li>Os palpites precisam estar na biblioteca do jogo. <button type="button" class="link" id="btnBiblioteca">Ver as palavras aceitas</button>.</li>
+        <li>Os palpites precisam ser palavras de cinco letras do dicionário (mais de 20 mil aceitas). As respostas sorteadas vêm de uma lista menor, com significado. <button type="button" class="link" id="btnBiblioteca">Ver as palavras aceitas</button>.</li>
       </ul>
 
       <table class="tabela-modos">
@@ -162,7 +164,7 @@
       </div>
       <h3 class="subtitulo-modal">Distribuição de tentativas</h3>
       <div class="distribuicao" id="distribuicao"></div>
-      <p class="nota">Vale para todas as rodadas desta modalidade, diárias ou de prática.</p>
+      <p class="nota">Vale para o diário desta modalidade. A sequência zera se um dia ficar sem vitória.</p>
 
       <section class="pratica-resumo" aria-labelledby="tituloPratica">
         <h3 class="subtitulo-modal" id="tituloPratica">Modo prática</h3>
@@ -171,7 +173,7 @@
           <div><strong id="statPraticaErros">0</strong><span>palavras erradas</span></div>
           <div><strong id="statPraticaJogos">0</strong><span>práticas concluídas</span></div>
         </div>
-        <p class="nota">Contagem por palavra nesta modalidade. No modo prática, uma palavra pode voltar a ser sorteada depois de 90 dias.</p>
+        <p class="nota">Contagem por palavra nesta modalidade. Abandonar uma prática em andamento conta as palavras não resolvidas como erros. Uma palavra pode voltar a ser sorteada depois de 90 dias.</p>
       </section>
     </div>
   </dialog>
@@ -187,7 +189,7 @@
       <div class="resultado-acoes">
         <button type="button" class="botao botao-primario" id="btnCompartilhar">Compartilhar</button>
         <button type="button" class="botao" id="btnBaixarImagem">Baixar imagem</button>
-        <button type="button" class="botao" id="btnNovoResultado">Nova rodada</button>
+        <button type="button" class="botao" id="btnNovoResultado">Jogar prática</button>
       </div>
     </div>
   </dialog>
@@ -199,7 +201,7 @@
     </div>
     <div class="modal-corpo">
       <input type="search" id="buscaPalavra" class="busca" placeholder="Buscar palavra…" autocomplete="off" spellcheck="false" aria-label="Buscar palavra">
-      <p class="nota" id="contagemBiblioteca">Palavras de cinco letras.</p>
+      <p class="nota" id="contagemBiblioteca">Palavras aceitas como palpite.</p>
       <p class="nota vazio" id="bibliotecaVazia" hidden>Nenhuma palavra encontrada.</p>
       <ul class="lista-palavras" id="listaPalavras"></ul>
     </div>

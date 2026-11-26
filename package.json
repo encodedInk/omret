@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node servidor.mjs",
-    "palavras": "node ferramentas/gerar-palavras.mjs"
+    "palavras": "node ferramentas/gerar-palavras.mjs",
+    "aceitas": "node ferramentas/gerar-aceitas.mjs"
   }
 }

@@ -1,7 +1,8 @@
 /* ==========================================================================
    omret — termo, dueto e quarteto
    Regras: 1 palavra em 6 tentativas, 2 em 7, 4 em 9.
-   Diário/livre: sem repetição até a biblioteca dar a volta.
+   Diário: o mesmo para todos (derivado da data), sem repetição até a
+   lista de respostas dar a volta.
    Prática: cada palavra pode voltar depois de 90 dias.
    ========================================================================== */
 
@@ -26,13 +27,18 @@
     quarteto: { nome: 'quarteto', tabuleiros: 4, tentativas: 9 },
   };
 
-  const BIBLIOTECA = (window.OMRET_PALAVRAS || []).map(([com, sem, significado]) => ({
+  const BIBLIOTECA = (window.OMRET_PALAVRAS || []).map(([com, sem, significado, resposta]) => ({
     com,
     sem,
     significado,
+    resposta: resposta !== 0,
   }));
   const POR_PALAVRA = new Map(BIBLIOTECA.map((p) => [p.sem, p]));
-  const DICIONARIO = new Set(BIBLIOTECA.map((p) => p.sem));
+  // Palavras sem significado que só valem como palpite (de aceitas.txt).
+  const ACEITAS = String(window.OMRET_ACEITAS || '').split(' ').filter(Boolean);
+  const DICIONARIO = new Set([...BIBLIOTECA.map((p) => p.sem), ...ACEITAS]);
+  // Palavras que podem ser sorteadas; as demais só valem como palpite.
+  const RESPOSTAS = BIBLIOTECA.filter((p) => p.resposta);
 
   const reduzirMovimento = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const DURACAO_VIRAR = 440;
@@ -76,6 +82,7 @@
     tituloResultado: document.getElementById('tituloResultado'),
     resultadoResumo: document.getElementById('resultadoResumo'),
     resultadoPalavras: document.getElementById('resultadoPalavras'),
+    anuncio: document.getElementById('anuncio'),
   };
 
   /* ------------------------------------------------------------------------
@@ -88,7 +95,6 @@
       tema: null,
       jogos: {},
       ativos: {},
-      usadas: {},
       estatisticas: {},
       pratica: {},
       modoPratica: false,
@@ -108,7 +114,6 @@
         tema: salvo.tema === 'claro' || salvo.tema === 'escuro' ? salvo.tema : null,
         jogos: salvo.jogos && typeof salvo.jogos === 'object' ? salvo.jogos : {},
         ativos: salvo.ativos && typeof salvo.ativos === 'object' ? salvo.ativos : {},
-        usadas: salvo.usadas && typeof salvo.usadas === 'object' ? salvo.usadas : {},
         estatisticas: salvo.estatisticas && typeof salvo.estatisticas === 'object' ? salvo.estatisticas : {},
         pratica: salvo.pratica && typeof salvo.pratica === 'object' && !Array.isArray(salvo.pratica) ? salvo.pratica : {},
         modoPratica: salvo.modoPratica === true,
@@ -120,18 +125,29 @@
 
   let dados = carregarDados();
 
-  // Sincroniza o modo ativo com a preferência de prática salva.
-  if (dados.modoPratica && dados.ativos[dados.modo] !== 'pratica') {
-    dados.ativos[dados.modo] = 'pratica';
-  }
+  // Remove as rodadas "livres" da versão anterior: só existem diário e prática.
+  Object.keys(dados.jogos).forEach((chave) => {
+    if (chave.endsWith(':livre')) delete dados.jogos[chave];
+  });
+  Object.keys(dados.ativos).forEach((modo) => {
+    if (dados.ativos[modo] !== 'pratica') dados.ativos[modo] = 'diario';
+  });
 
-  let palpiteAtual = '';
+  // Sincroniza o switch de prática com o modo ativo, nos dois sentidos.
+  if (dados.ativos[dados.modo] === 'pratica') dados.modoPratica = true;
+  if (dados.modoPratica) dados.ativos[dados.modo] = 'pratica';
+
+  // Palpite em edição: uma posição por letra, '' para vazia.
+  let letras = Array(TAMANHO).fill('');
   let letraSelecionada = '';
   let cursorPos = 0;
   let bloqueado = false;
   let geracao = 0;
   let diaAtual = hoje();
   let avisoTimer = 0;
+  // Rodada que acabou de terminar e cujo resultado ainda não foi exibido.
+  // Enquanto estiver aqui, a prática não avança para a próxima rodada.
+  let resultadoPendente = null;
 
   function salvar() {
     try {
@@ -145,9 +161,23 @@
      Utilidades
      ------------------------------------------------------------------------ */
 
-  function hoje() {
-    const d = new Date();
+  function formatarData(d) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function hoje() {
+    return formatarData(new Date());
+  }
+
+  function diaAnterior(iso) {
+    const [ano, mes, dia] = String(iso).split('-').map(Number);
+    return formatarData(new Date(ano, mes - 1, dia - 1));
+  }
+
+  // Número de dias corridos desde 1970-01-01 para uma data local AAAA-MM-DD.
+  function numeroDoDia(iso) {
+    const [ano, mes, dia] = String(iso).split('-').map(Number);
+    return Math.round(Date.UTC(ano, mes - 1, dia) / MS_DIA);
   }
 
   function dataCurta(iso) {
@@ -265,7 +295,7 @@
     const agora = Date.now();
     const limite = agora - DIAS_PRATICA * MS_DIA;
 
-    const liberadas = BIBLIOTECA.filter((p) => {
+    const liberadas = RESPOSTAS.filter((p) => {
       const usadoEm = pratica.usos[p.sem];
       return !usadoEm || usadoEm <= limite;
     });
@@ -278,7 +308,7 @@
       // Caso extremo: todas as palavras foram usadas há menos de 90 dias.
       // Completa com as mais antigas, sem repetir dentro da mesma rodada.
       const liberadasSem = new Set(liberadas.map((p) => p.sem));
-      const restantes = BIBLIOTECA
+      const restantes = RESPOSTAS
         .filter((p) => !liberadasSem.has(p.sem))
         .sort((a, b) => (pratica.usos[a.sem] || 0) - (pratica.usos[b.sem] || 0));
 
@@ -294,50 +324,30 @@
     return alvos;
   }
 
-  function sortearAlvos(modo, tipo) {
-    if (tipo === 'pratica') return sortearPratica(modo);
+  // O diário não depende de nada guardado no navegador: cada modalidade tem
+  // uma ordem fixa das respostas (embaralhada com semente constante) e cada
+  // dia avança alguns passos nela. Assim todo mundo recebe as mesmas palavras
+  // e nenhuma se repete até a lista inteira dar a volta.
+  const ordemDiaria = {};
 
+  function alvosDiario(modo, data) {
     const cfg = MODOS[modo];
-    const usadas = new Set(
-      (Array.isArray(dados.usadas[modo]) ? dados.usadas[modo] : []).filter((p) => typeof p === 'string'),
-    );
-
-    let disponiveis = BIBLIOTECA.filter((p) => !usadas.has(p.sem));
-    if (disponiveis.length < cfg.tabuleiros) {
-      // A biblioteca deu a volta: começa um novo ciclo, preservando as
-      // palavras das rodadas que ainda estão guardadas nesta modalidade.
-      const reservadas = new Set();
-      Object.values(dados.jogos).forEach((jogo) => {
-        if (jogo && jogo.modo === modo && jogo.tipo !== 'pratica' && Array.isArray(jogo.alvos)) {
-          jogo.alvos.forEach((palavra) => reservadas.add(palavra));
-        }
-      });
-      usadas.clear();
-      reservadas.forEach((palavra) => usadas.add(palavra));
-      disponiveis = BIBLIOTECA.filter((p) => !usadas.has(p.sem));
-      if (disponiveis.length < cfg.tabuleiros) {
-        usadas.clear();
-        disponiveis = BIBLIOTECA.slice();
-      }
+    if (!ordemDiaria[modo]) {
+      ordemDiaria[modo] = embaralhar(RESPOSTAS.map((p) => p.sem), criarRng(hashTexto(`omret|${modo}`)));
     }
-
-    const rng = tipo === 'diario' ? criarRng(hashTexto(`${hoje()}|${modo}`)) : Math.random;
-    const escolhidos = embaralhar(disponiveis, rng)
-      .slice(0, cfg.tabuleiros)
-      .map((p) => p.sem);
-
-    escolhidos.forEach((palavra) => usadas.add(palavra));
-    dados.usadas[modo] = [...usadas];
-    return escolhidos;
+    const ordem = ordemDiaria[modo];
+    const inicio = (numeroDoDia(data) * cfg.tabuleiros) % ordem.length;
+    return Array.from({ length: cfg.tabuleiros }, (_, i) => ordem[(inicio + i) % ordem.length]);
   }
 
   function criarJogo(modo, tipo) {
+    const data = hoje();
     return {
       modo,
       tipo,
-      data: hoje(),
+      data,
       criadoEm: Date.now(),
-      alvos: sortearAlvos(modo, tipo),
+      alvos: tipo === 'pratica' ? sortearPratica(modo) : alvosDiario(modo, data),
       palpites: [],
       contabilizado: false,
     };
@@ -348,7 +358,9 @@
     const cfg = MODOS[jogo.modo];
     if (!Array.isArray(jogo.alvos) || jogo.alvos.length !== cfg.tabuleiros) return false;
     if (new Set(jogo.alvos).size !== jogo.alvos.length) return false;
-    if (!jogo.alvos.every((a) => typeof a === 'string' && DICIONARIO.has(a))) return false;
+    // Não exige que o alvo ainda esteja na biblioteca: se ela for atualizada
+    // no meio do dia, a rodada em andamento continua valendo.
+    if (!jogo.alvos.every((a) => typeof a === 'string' && /^[a-z]{5}$/.test(a))) return false;
     if (!Array.isArray(jogo.palpites)) return false;
 
     return jogo.palpites.every((jogada) => (
@@ -361,42 +373,41 @@
     ));
   }
 
+  // Devolve a rodada em jogo. Só cria uma rodada nova quando não há uma
+  // válida (ou quando o diário virou o dia); nunca avança a prática sozinha,
+  // para que funções de desenho possam chamá-la sem efeitos colaterais.
   function jogoAtual() {
     const modo = dados.modo;
-    const ativo = dados.ativos[modo];
-    const tipo = ativo === 'pratica' || ativo === 'livre' ? ativo : 'diario';
+    const tipo = dados.ativos[modo] === 'pratica' ? 'pratica' : 'diario';
     const chave = `${modo}:${tipo}`;
     let jogo = dados.jogos[chave];
 
-    if (tipo === 'diario') {
-      if (!jogoValido(jogo) || jogo.modo !== modo || jogo.data !== hoje()) {
-        jogo = criarJogo(modo, 'diario');
-        dados.jogos[chave] = jogo;
-        dados.ativos[modo] = 'diario';
-        salvar();
-      }
-    } else if (tipo === 'pratica') {
-      if (!jogoValido(jogo) || jogo.modo !== modo || jogo.tipo !== 'pratica') {
-        jogo = criarJogo(modo, 'pratica');
-        dados.jogos[chave] = jogo;
-        salvar();
-      } else if (statusJogo(jogo) !== 'jogando' && !el.dlgResultado.open) {
-        // A prática não muda com o dia: a próxima rodada só é sorteada
-        // quando a anterior termina e o resultado deixa de estar na tela.
-        // Se a página foi recarregada antes da contagem, ela é feita aqui.
-        if (!jogo.contabilizado) contabilizar(jogo, statusJogo(jogo) === 'ganhou');
-        jogo = criarJogo(modo, 'pratica');
-        dados.jogos[chave] = jogo;
-        salvar();
-      }
-    } else if (!jogoValido(jogo) || jogo.modo !== modo || jogo.tipo !== 'livre') {
-      // Compatibilidade com rodadas livres salvas pela versão anterior.
-      jogo = criarJogo(modo, 'livre');
+    const invalido = !jogoValido(jogo) || jogo.modo !== modo || jogo.tipo !== tipo;
+    if (invalido || (tipo === 'diario' && jogo.data !== hoje())) {
+      jogo = criarJogo(modo, tipo);
       dados.jogos[chave] = jogo;
+      dados.ativos[modo] = tipo;
       salvar();
     }
 
     return jogo;
+  }
+
+  // A prática não muda com o dia: a próxima rodada só é sorteada quando a
+  // anterior terminou e o resultado já foi exibido e fechado. Se a página foi
+  // recarregada antes da contagem, ela é feita aqui.
+  function avancarPraticaConcluida() {
+    const modo = dados.modo;
+    if (dados.ativos[modo] !== 'pratica' || el.dlgResultado.open) return;
+
+    const chave = `${modo}:pratica`;
+    const jogo = dados.jogos[chave];
+    if (!jogoValido(jogo) || jogo.modo !== modo || jogo.tipo !== 'pratica') return;
+    if (jogo === resultadoPendente || statusJogo(jogo) === 'jogando') return;
+
+    if (!jogo.contabilizado) contabilizar(jogo, statusJogo(jogo) === 'ganhou');
+    dados.jogos[chave] = criarJogo(modo, 'pratica');
+    salvar();
   }
 
   function indiceResolucao(jogo, indice) {
@@ -422,6 +433,7 @@
       vitorias: Number(atual && atual.vitorias) || 0,
       sequencia: Number(atual && atual.sequencia) || 0,
       recorde: Number(atual && atual.recorde) || 0,
+      ultimaData: atual && typeof atual.ultimaData === 'string' ? atual.ultimaData : null,
       distribuicao: Array.from({ length: cfg.tentativas }, (_, i) => Number(atual && atual.distribuicao && atual.distribuicao[i]) || 0),
     };
     dados.estatisticas[modo] = stats;
@@ -440,28 +452,43 @@
     dados.pratica[jogo.modo] = pratica;
   }
 
+  // A prática tem contador próprio; as estatísticas (e a sequência) são só
+  // do diário, para que não possam ser infladas abandonando práticas.
   function contabilizar(jogo, ganhou) {
     if (jogo.contabilizado) return;
     jogo.contabilizado = true;
+
+    if (jogo.tipo === 'pratica') {
+      contabilizarPratica(jogo);
+      salvar();
+      return;
+    }
 
     const stats = obterEstatisticas(jogo.modo);
     stats.jogos += 1;
 
     if (ganhou) {
       stats.vitorias += 1;
-      stats.sequencia += 1;
+      // A sequência só continua se a última vitória foi no dia anterior.
+      const continua = !stats.ultimaData || stats.ultimaData === diaAnterior(jogo.data);
+      stats.sequencia = continua ? stats.sequencia + 1 : 1;
       stats.recorde = Math.max(stats.recorde, stats.sequencia);
       const indice = jogo.palpites.length - 1;
       if (indice >= 0 && indice < stats.distribuicao.length) stats.distribuicao[indice] += 1;
     } else {
       stats.sequencia = 0;
     }
+    stats.ultimaData = jogo.data;
 
     dados.estatisticas[jogo.modo] = stats;
-
-    if (jogo.tipo === 'pratica') contabilizarPratica(jogo);
-
     salvar();
+  }
+
+  // Sequência que vale hoje: zera se um dia passou sem diário concluído.
+  function sequenciaAtual(stats) {
+    if (!stats.ultimaData) return stats.sequencia;
+    const agora = hoje();
+    return stats.ultimaData === agora || stats.ultimaData === diaAnterior(agora) ? stats.sequencia : 0;
   }
 
   function renderizarEstatisticas(modo) {
@@ -471,7 +498,7 @@
     document.getElementById('statVitorias').textContent = stats.jogos
       ? `${Math.round((stats.vitorias / stats.jogos) * 100)}%`
       : '0%';
-    document.getElementById('statSequencia').textContent = String(stats.sequencia);
+    document.getElementById('statSequencia').textContent = String(sequenciaAtual(stats));
     document.getElementById('statRecorde').textContent = String(stats.recorde);
 
     const pratica = obterPratica(modo);
@@ -527,33 +554,33 @@
       bloco.appendChild(rotulo);
     }
 
+    bloco.setAttribute('aria-label', `Palavra ${indice + 1} de ${jogo.alvos.length}`);
+
     const grade = document.createElement('div');
     grade.className = 'grade';
-    grade.setAttribute('role', 'grid');
-    grade.setAttribute('aria-label', `Tabuleiro ${indice + 1} de ${jogo.alvos.length}`);
     const resolvidoEm = indiceResolucao(jogo, indice);
 
     for (let linha = 0; linha < cfg.tentativas; linha++) {
       const elementosLinha = document.createElement('div');
       elementosLinha.className = 'linha-tabuleiro';
-      elementosLinha.setAttribute('role', 'row');
+      const revelada = linha < jogo.palpites.length && (resolvidoEm < 0 || linha <= resolvidoEm);
 
       for (let coluna = 0; coluna < TAMANHO; coluna++) {
         const celula = document.createElement('div');
         celula.className = 'celula';
-        celula.setAttribute('role', 'gridcell');
+        // Leitores de tela leem a linha inteira pelo rótulo do grupo.
+        celula.setAttribute('aria-hidden', 'true');
 
-        if (linha < jogo.palpites.length && (resolvidoEm < 0 || linha <= resolvidoEm)) {
+        if (revelada) {
           const jogada = jogo.palpites[linha];
-          const estado = jogada.resultados[indice][coluna];
           celula.textContent = jogada.palavra[coluna];
-          celula.dataset.estado = estado;
-          celula.setAttribute('aria-label', `${jogada.palavra[coluna].toUpperCase()}: ${ROTULO_ESTADO[estado]}`);
+          celula.dataset.estado = jogada.resultados[indice][coluna];
         }
 
         elementosLinha.appendChild(celula);
       }
 
+      if (revelada) rotularLinha(elementosLinha, jogo.palpites[linha], indice, linha);
       grade.appendChild(elementosLinha);
     }
 
@@ -561,7 +588,19 @@
     return bloco;
   }
 
+  function descreverResultado(jogada, indice) {
+    return jogada.resultados[indice]
+      .map((estado, coluna) => `${jogada.palavra[coluna].toUpperCase()} ${ROTULO_ESTADO[estado]}`)
+      .join(', ');
+  }
+
+  function rotularLinha(linhaEl, jogada, indice, numero) {
+    linhaEl.setAttribute('role', 'group');
+    linhaEl.setAttribute('aria-label', `Tentativa ${numero + 1}: ${descreverResultado(jogada, indice)}`);
+  }
+
   function renderizarTudo() {
+    avancarPraticaConcluida();
     const jogo = jogoAtual();
     geracao += 1;
     bloqueado = false;
@@ -572,8 +611,9 @@
     document.body.dataset.tipo = jogo.tipo;
 
     document.querySelectorAll('.modo').forEach((botao) => {
-      botao.setAttribute('aria-selected', String(botao.dataset.modo === jogo.modo));
+      botao.setAttribute('aria-pressed', String(botao.dataset.modo === jogo.modo));
     });
+    el.btnModoPratica.setAttribute('aria-checked', String(dados.modoPratica));
 
     el.tabuleiros.dataset.tabuleiros = String(MODOS[jogo.modo].tabuleiros);
     el.tabuleiros.innerHTML = '';
@@ -581,7 +621,7 @@
       el.tabuleiros.appendChild(criarTabuleiro(jogo, indice));
     });
 
-    palpiteAtual = '';
+    letras = Array(TAMANHO).fill('');
     cursorPos = 0;
     atualizarTeclado(jogo);
     atualizarStatus(jogo);
@@ -593,18 +633,17 @@
     const status = statusJogo(jogo);
     const qtd = descreverQtd(jogo.alvos.length);
 
-    const rotulos = { diario: 'diário', pratica: 'prática', livre: 'livre' };
-    el.selo.textContent = rotulos[jogo.tipo] || 'diário';
+    const pratica = jogo.tipo === 'pratica';
+    el.selo.textContent = pratica ? 'prática' : 'diário';
+    el.selo.title = pratica
+      ? 'Modo prática · nova rodada a cada jogo concluído'
+      : `Diário de ${dataCurta(jogo.data)}`;
 
-    if (jogo.tipo === 'diario') {
-      el.selo.title = `Diário de ${dataCurta(jogo.data)}`;
-    } else if (jogo.tipo === 'pratica') {
-      el.selo.title = 'Modo prática · nova rodada a cada jogo concluído';
-    } else {
-      el.selo.title = 'Rodada livre';
-    }
+    const rotuloNovo = pratica ? 'Nova prática' : 'Jogar prática';
+    el.btnNovo.title = rotuloNovo;
+    el.btnNovo.setAttribute('aria-label', rotuloNovo);
 
-    if (jogo.tipo === 'pratica') {
+    if (pratica) {
       const pratica = obterPratica(jogo.modo);
       const total = pratica.acertos + pratica.erros;
       const pctAcertos = total ? Math.round((pratica.acertos / total) * 100) : 0;
@@ -616,7 +655,6 @@
       document.getElementById('placarTexto').textContent = `${pratica.acertos} ${pratica.acertos === 1 ? 'acerto' : 'acertos'} · ${pratica.erros} ${pratica.erros === 1 ? 'erro' : 'erros'}`;
     } else {
       el.placarPratica.hidden = true;
-      el.placarPratica.textContent = '';
     }
 
     if (status === 'jogando') {
@@ -657,7 +695,9 @@
     });
   }
 
-  function renderizarPalpiteAtual() {
+  // Desenha o palpite em edição. `colunaPulso` é a célula que acabou de
+  // receber uma letra e deve pulsar (-1 para nenhuma).
+  function renderizarPalpiteAtual(colunaPulso = -1) {
     const jogo = jogoAtual();
     if (statusJogo(jogo) !== 'jogando') return;
 
@@ -667,36 +707,23 @@
       const indice = Number(bloco.dataset.indice);
       if (indiceResolucao(jogo, indice) >= 0) return;
 
-      const linhas = bloco.querySelectorAll('.grade .linha-tabuleiro');
-      const linha = linhas[numeroLinha];
+      const linha = bloco.querySelectorAll('.grade .linha-tabuleiro')[numeroLinha];
       if (!linha) return;
 
       for (let c = 0; c < TAMANHO; c++) {
         const celula = linha.children[c];
-        const letra = palpiteAtual[c] || '';
-        const vazia = letra === ' ' || letra === '';
-        if (celula.textContent !== letra) celula.textContent = vazia ? '' : letra;
-        celula.classList.toggle('preenchida', !vazia);
+        const letra = letras[c];
+        if (celula.textContent !== letra) celula.textContent = letra;
+        celula.classList.toggle('preenchida', letra !== '');
         celula.removeAttribute('data-estado');
+
+        if (c === colunaPulso) {
+          celula.classList.remove('pulso');
+          void celula.offsetWidth;
+          celula.classList.add('pulso');
+          window.setTimeout(() => celula.classList.remove('pulso'), 150);
+        }
       }
-    });
-
-    if (!palpiteAtual.trim()) {
-      atualizarCursorVisual();
-      return;
-    }
-    const coluna = cursorPos;
-
-    el.tabuleiros.querySelectorAll('.tabuleiro').forEach((bloco) => {
-      const indice = Number(bloco.dataset.indice);
-      if (indiceResolucao(jogo, indice) >= 0) return;
-      const linha = bloco.querySelectorAll('.grade .linha-tabuleiro')[numeroLinha];
-      const celula = linha && linha.children[coluna];
-      if (!celula) return;
-      celula.classList.remove('pulso');
-      void celula.offsetWidth;
-      celula.classList.add('pulso');
-      window.setTimeout(() => celula.classList.remove('pulso'), 150);
     });
 
     atualizarCursorVisual();
@@ -758,14 +785,25 @@
       if (!linha) return;
 
       [...linha.children].forEach((celula, coluna) => {
-        const estado = jogada.resultados[indice][coluna];
         celula.textContent = jogada.palavra[coluna];
-        celula.dataset.estado = estado;
+        celula.dataset.estado = jogada.resultados[indice][coluna];
+        celula.classList.remove('cursor');
         celula.classList.add('preenchida', 'virar');
         celula.style.setProperty('--atraso', `${coluna * ATRASO_CELULA + indice * ATRASO_TABULEIRO}ms`);
-        celula.setAttribute('aria-label', `${jogada.palavra[coluna].toUpperCase()}: ${ROTULO_ESTADO[estado]}`);
       });
+      rotularLinha(linha, jogada, indice, indiceJogada);
     });
+  }
+
+  // Anuncia o resultado do palpite para leitores de tela.
+  function anunciarJogada(jogo, jogada, resolvidosAntes) {
+    const partes = [jogada.palavra.toUpperCase()];
+    jogo.alvos.forEach((_, indice) => {
+      if (resolvidosAntes[indice]) return;
+      const descricao = descreverResultado(jogada, indice);
+      partes.push(jogo.alvos.length > 1 ? `palavra ${indice + 1}: ${descricao}` : descricao);
+    });
+    el.anuncio.textContent = partes.join('. ');
   }
 
   function marcarVitorias(jogo) {
@@ -814,22 +852,18 @@
     }
 
     if (tecla === 'apagar') {
+      // Apaga a letra sob o cursor; se a posição estiver vazia, recua e
+      // apaga a anterior. As outras letras nunca mudam de lugar.
       piscarTecla('apagar');
-      if (palpiteAtual) {
-        if (cursorPos > 0) {
-          palpiteAtual = palpiteAtual.slice(0, cursorPos - 1) + palpiteAtual.slice(cursorPos);
-          cursorPos -= 1;
-        } else {
-          palpiteAtual = palpiteAtual.slice(0, -1);
-        }
-        renderizarPalpiteAtual();
-        letraSelecionada = palpiteAtual.slice(-1) || '';
-        atualizarSelecaoTeclado();
-        atualizarCursorVisual();
-      } else {
-        letraSelecionada = '';
-        atualizarSelecaoTeclado();
+      if (cursorPos < TAMANHO && letras[cursorPos]) {
+        letras[cursorPos] = '';
+      } else if (cursorPos > 0) {
+        cursorPos -= 1;
+        letras[cursorPos] = '';
       }
+      letraSelecionada = '';
+      atualizarSelecaoTeclado();
+      renderizarPalpiteAtual();
       return;
     }
 
@@ -846,26 +880,20 @@
     }
 
     if (/^[a-z]$/.test(tecla)) {
-      if (cursorPos < palpiteAtual.length) {
-        // Substitui letra existente na posição do cursor.
-        palpiteAtual = palpiteAtual.slice(0, cursorPos) + tecla + palpiteAtual.slice(cursorPos + 1);
-        cursorPos = Math.min(cursorPos + 1, TAMANHO);
-      } else if (palpiteAtual.length < TAMANHO) {
-        // Preenche com placeholders até a posição do cursor, se necessário.
-        while (palpiteAtual.length < cursorPos) {
-          palpiteAtual += ' ';
-        }
-        palpiteAtual += tecla;
-        cursorPos = Math.min(cursorPos + 1, TAMANHO);
-      } else {
-        // Palavra completa e cursor no final: não há onde inserir.
-        return;
-      }
+      // Cursor depois da última posição: não há onde escrever.
+      if (cursorPos >= TAMANHO) return;
+
+      const coluna = cursorPos;
+      letras[coluna] = tecla;
+      // Avança para a próxima posição vazia (ou para o fim).
+      let proxima = coluna + 1;
+      while (proxima < TAMANHO && letras[proxima]) proxima += 1;
+      cursorPos = proxima;
+
       letraSelecionada = tecla;
-      renderizarPalpiteAtual();
+      renderizarPalpiteAtual(coluna);
       piscarTecla(tecla);
       atualizarSelecaoTeclado();
-      atualizarCursorVisual();
     }
   }
 
@@ -875,32 +903,36 @@
     const jogo = jogoAtual();
     if (statusJogo(jogo) !== 'jogando') return;
 
-    if (palpiteAtual.length !== TAMANHO) {
-      avisar('Complete as cinco letras.');
+    if (!letras.every(Boolean)) {
+      avisar('Preencha as cinco letras.');
       tremerLinha();
       return;
     }
 
-    if (palpiteAtual.includes(' ')) {
-      avisar('Preencha todas as cinco letras.');
+    const palavra = letras.join('');
+
+    if (!DICIONARIO.has(palavra)) {
+      avisar('Essa palavra não é aceita.');
       tremerLinha();
       return;
     }
 
-    if (!DICIONARIO.has(palpiteAtual)) {
-      avisar('Essa palavra não está na biblioteca.');
+    if (jogo.palpites.some((jogada) => jogada.palavra === palavra)) {
+      avisar('Você já tentou essa palavra.');
       tremerLinha();
       return;
     }
 
-    const palavra = palpiteAtual;
     const resolvidosAntes = jogo.alvos.map((_, indice) => indiceResolucao(jogo, indice) >= 0);
     const resultados = jogo.alvos.map((alvo) => avaliar(palavra, alvo));
 
     jogo.palpites.push({ palavra, resultados });
-    palpiteAtual = '';
+    letras = Array(TAMANHO).fill('');
     cursorPos = 0;
     bloqueado = true;
+    // Se a rodada terminou, o resultado precisa ser exibido antes de a
+    // prática poder avançar (ver avancarPraticaConcluida).
+    if (statusJogo(jogo) !== 'jogando') resultadoPendente = jogo;
     salvar();
 
     atualizarStatus(jogo);
@@ -914,18 +946,21 @@
 
       atualizarTeclado(jogo);
       marcarVitorias(jogo);
+      anunciarJogada(jogo, jogo.palpites[jogo.palpites.length - 1], resolvidosAntes);
 
       const status = statusJogo(jogo);
-      bloqueado = false;
 
       if (status !== 'jogando') {
+        // Continua bloqueado até o resultado abrir.
         contabilizar(jogo, status === 'ganhou');
         atualizarStatus(jogo);
         window.setTimeout(() => {
           if (minhaGeracao !== geracao) return;
+          bloqueado = false;
           abrirResultado(jogo);
         }, reduzirMovimento ? 0 : 360);
       } else {
+        bloqueado = false;
         renderizarPalpiteAtual();
       }
     }, espera);
@@ -939,12 +974,11 @@
     const status = statusJogo(jogo);
     const ganhou = status === 'ganhou';
     const cfg = MODOS[jogo.modo];
-    const origem = jogo.tipo === 'diario'
-      ? `diário de ${dataCurta(jogo.data)}`
-      : jogo.tipo === 'pratica' ? 'prática' : 'rodada livre';
+    const origem = jogo.tipo === 'pratica' ? 'prática' : `diário de ${dataCurta(jogo.data)}`;
+    if (resultadoPendente === jogo) resultadoPendente = null;
 
     el.tituloResultado.textContent = ganhou ? 'Mandou bem!' : 'Quase lá';
-    el.btnNovoResultado.textContent = jogo.tipo === 'pratica' ? 'Nova prática' : 'Nova rodada';
+    el.btnNovoResultado.textContent = jogo.tipo === 'pratica' ? 'Nova prática' : 'Jogar prática';
     const fimDaFrase = jogo.alvos.length === 1 ? 'A palavra era:' : 'As palavras eram:';
     el.resultadoResumo.textContent = ganhou
       ? `${jogo.modo} · ${origem} · resolvido em ${jogo.palpites.length} de ${cfg.tentativas} tentativas.`
@@ -989,16 +1023,20 @@
       el.resultadoPalavras.appendChild(grupo);
     });
 
-    if (typeof el.dlgResultado.showModal === 'function') {
+    if (!el.dlgResultado.open && typeof el.dlgResultado.showModal === 'function') {
       el.dlgResultado.showModal();
     }
+  }
+
+  function rotuloRodada(jogo) {
+    return `${jogo.modo} · ${jogo.tipo === 'pratica' ? 'prática' : dataCurta(jogo.data)}`;
   }
 
   function textoCompartilhar(jogo) {
     const cfg = MODOS[jogo.modo];
     const ganhou = statusJogo(jogo) === 'ganhou';
     const linhas = [
-      `omret · ${jogo.modo}${jogo.tipo === 'diario' ? ` · ${dataCurta(jogo.data)}` : jogo.tipo === 'pratica' ? ' · prática' : ' · livre'}`,
+      `omret · ${rotuloRodada(jogo)}`,
       ganhou
         ? `resolvido em ${jogo.palpites.length} de ${cfg.tentativas} tentativas`
         : `não resolvido em ${cfg.tentativas} tentativas`,
@@ -1031,15 +1069,121 @@
     return { certa: '#ffffff', presente: '#241c0c', ausente: '#ffffff' }[estado];
   }
 
-  async function gerarImagemResultado(jogo) {
+  function fonte(peso, tamanho) {
+    const familia = getComputedStyle(document.documentElement).getPropertyValue('--fonte').trim()
+      || 'system-ui, sans-serif';
+    return `${peso} ${tamanho}px ${familia}`;
+  }
+
+  // Equivalente a ctx.roundRect, que não existe no Safari anterior ao 16.
+  function retanguloArredondado(ctx, x, y, largura, altura, raio) {
+    ctx.beginPath();
+    ctx.moveTo(x + raio, y);
+    ctx.arcTo(x + largura, y, x + largura, y + altura, raio);
+    ctx.arcTo(x + largura, y + altura, x, y + altura, raio);
+    ctx.arcTo(x, y + altura, x, y, raio);
+    ctx.arcTo(x, y, x + largura, y, raio);
+    ctx.closePath();
+  }
+
+  function quebrarTexto(ctx, texto, maximo) {
+    const linhas = [];
+    let linha = '';
+    texto.split(' ').forEach((palavra) => {
+      const teste = linha ? `${linha} ${palavra}` : palavra;
+      if (linha && ctx.measureText(teste).width > maximo) {
+        linhas.push(linha);
+        linha = palavra;
+      } else {
+        linha = teste;
+      }
+    });
+    if (linha) linhas.push(linha);
+    return linhas;
+  }
+
+  // Desenha o resultado em coordenadas lógicas e devolve o tamanho usado.
+  // É chamada duas vezes: uma para medir (num canvas descartável) e outra
+  // para desenhar de fato, então a altura sempre corresponde ao conteúdo.
+  function desenharResultado(ctx, jogo, cores) {
     const cfg = MODOS[jogo.modo];
     const ganhou = statusJogo(jogo) === 'ganhou';
-    const escala = 2;
-    const celula = 56 * escala;
-    const gap = 8 * escala;
-    const padding = 32 * escala;
-    const espacoTabuleiro = 24 * escala;
+    const C = 56;
+    const G = 8;
+    const P = 32;
+    const ESPACO = 24;
+    const W = P * 2 + C * TAMANHO + G * (TAMANHO - 1);
+    let y = P;
 
+    const texto = (conteudo, x, base, cor, fonteCss, alinhamento = 'left', linhaBase = 'alphabetic') => {
+      ctx.fillStyle = cor;
+      ctx.font = fonteCss;
+      ctx.textAlign = alinhamento;
+      ctx.textBaseline = linhaBase;
+      ctx.fillText(conteudo, x, base);
+    };
+
+    texto('omret', P, y + 24, cores.texto, 'bold 24px Georgia, serif');
+    y += 36;
+    texto(rotuloRodada(jogo), P, y + 12, cores.textoFraco, fonte(400, 12));
+    y += 28;
+    texto(
+      ganhou
+        ? `resolvido em ${jogo.palpites.length} de ${cfg.tentativas} tentativas`
+        : `não resolvido em ${cfg.tentativas} tentativas`,
+      P, y + 16, cores.acento, fonte(700, 16),
+    );
+    y += 36;
+
+    jogo.alvos.forEach((alvo, indice) => {
+      const info = POR_PALAVRA.get(alvo);
+      const completa = (info && info.com) || alvo;
+      const resolvidoEm = indiceResolucao(jogo, indice);
+      const limite = resolvidoEm >= 0 ? resolvidoEm : jogo.palpites.length - 1;
+
+      if (jogo.alvos.length > 1) {
+        texto(`palavra ${indice + 1}`, P, y + 10, cores.textoFraco, fonte(700, 10));
+        y += 20;
+      }
+
+      for (let linha = 0; linha <= limite; linha++) {
+        const jogada = jogo.palpites[linha];
+        for (let coluna = 0; coluna < TAMANHO; coluna++) {
+          const estado = jogada.resultados[indice][coluna];
+          const x = P + coluna * (C + G);
+          const yy = y + linha * (C + G);
+          ctx.fillStyle = cores[estado];
+          retanguloArredondado(ctx, x, yy, C, C, 7);
+          ctx.fill();
+          texto(jogada.palavra[coluna].toUpperCase(), x + C / 2, yy + C / 2 + 1,
+            corTextoCelula(estado), fonte(700, 20), 'center', 'middle');
+        }
+      }
+      y += (limite + 1) * (C + G) - G + 12;
+
+      texto(completa.toUpperCase(), W / 2, y + 20, resolvidoEm >= 0 ? cores.certa : cores.textoFraco,
+        fonte(700, 20), 'center');
+      y += 32;
+
+      if (info && info.significado) {
+        ctx.font = fonte(400, 14);
+        quebrarTexto(ctx, info.significado, W - P * 2).forEach((linhaTexto) => {
+          texto(linhaTexto, W / 2, y, cores.textoFraco, fonte(400, 14), 'center', 'top');
+          y += 18;
+        });
+      }
+
+      y += ESPACO;
+    });
+
+    texto('omret — descubra palavras de cinco letras', W / 2, y + 11, cores.textoFraco, fonte(400, 11), 'center');
+    y += 11 + P;
+
+    return { largura: W, altura: Math.ceil(y) };
+  }
+
+  async function gerarImagemResultado(jogo) {
+    const escala = 2;
     const cores = {
       fundo: lerCor('--fundo', '#f6f2e8'),
       texto: lerCor('--texto', '#201d18'),
@@ -1050,171 +1194,27 @@
       ausente: lerCor('--ausente', '#6f6859'),
     };
 
-    const qtdPalavras = jogo.alvos.length;
-    const nLinhas = jogo.palpites.length;
-
-    const larguraGrid = celula * 5 + gap * 4;
-    const largura = padding * 2 + larguraGrid;
-
-    let altura = padding;
-    altura += 48 * escala; // título omret
-    altura += 10 * escala;
-    altura += 20 * escala; // modo/data
-    altura += 14 * escala;
-    altura += 22 * escala; // status
-    altura += 24 * escala;
-
-    jogo.alvos.forEach((_, indice) => {
-      altura += 20 * escala; // label "palavra N" (só se > 1)
-      if (qtdPalavras > 1) altura += 8 * escala;
-      altura += nLinhas * (celula + gap) - gap; // grid de células
-      altura += 12 * escala;
-      altura += 30 * escala; // palavra completa
-      altura += 8 * escala;
-      // significado estimado: 2 linhas
-      const info = POR_PALAVRA.get(jogo.alvos[indice]);
-      if (info?.significado) {
-        altura += 2 * (16 * escala) + 4 * escala;
-      }
-      altura += espacoTabuleiro;
-    });
-
-    altura -= espacoTabuleiro;
-    altura += padding;
+    const medida = desenharResultado(document.createElement('canvas').getContext('2d'), jogo, cores);
 
     const canvas = document.createElement('canvas');
-    canvas.width = largura;
-    canvas.height = altura;
+    canvas.width = medida.largura * escala;
+    canvas.height = medida.altura * escala;
     const ctx = canvas.getContext('2d');
-
-    ctx.scale(escala, escala);
-    const W = largura / escala;
-    const P = padding / escala;
-    const C = celula / escala;
-    const G = gap / escala;
-
-    // Fundo
     ctx.fillStyle = cores.fundo;
-    ctx.fillRect(0, 0, W, altura / escala);
-
-    let y = P;
-
-    // Título omret
-    ctx.fillStyle = cores.texto;
-    ctx.font = 'bold 24px Georgia, serif';
-    ctx.textAlign = 'left';
-    ctx.fillText('omret', P, y + 24);
-    y += 48;
-
-    // Modo / data
-    ctx.fillStyle = cores.textoFraco;
-    ctx.font = '12px ' + getComputedStyle(document.documentElement).getPropertyValue('--fonte');
-    const modoTexto = `${jogo.modo}${jogo.tipo === 'diario' ? ` · ${dataCurta(jogo.data)}` : jogo.tipo === 'pratica' ? ' · prática' : ' · livre'}`;
-    ctx.fillText(modoTexto, P, y + 12);
-    y += 20;
-
-    y += 14;
-
-    // Status
-    const ganhouTexto = ganhou
-      ? `resolvido em ${jogo.palpites.length} de ${cfg.tentativas} tentativas`
-      : `não resolvido em ${cfg.tentativas} tentativas`;
-    ctx.fillStyle = cores.acento;
-    ctx.font = 'bold 16px ' + getComputedStyle(document.documentElement).getPropertyValue('--fonte');
-    ctx.fillText(ganhouTexto, P, y + 16);
-    y += 24;
-
-    jogo.alvos.forEach((alvo, indice) => {
-      const info = POR_PALAVRA.get(alvo);
-      const completa = (info && info.com) || alvo;
-      const venceu = indiceResolucao(jogo, indice) >= 0;
-
-      if (qtdPalavras > 1) {
-        ctx.fillStyle = cores.textoFraco;
-        ctx.font = 'bold 10px ' + getComputedStyle(document.documentElement).getPropertyValue('--fonte');
-        ctx.textAlign = 'left';
-        ctx.fillText(`palavra ${indice + 1}`, P, y + 10);
-        y += 20;
-      }
-
-      // Grid de células
-      const limite = venceu ? indiceResolucao(jogo, indice) : jogo.palpites.length - 1;
-      for (let linha = 0; linha <= limite; linha++) {
-        const jogada = jogo.palpites[linha];
-        for (let coluna = 0; coluna < 5; coluna++) {
-          const estado = jogada.resultados[indice][coluna];
-          const letra = jogada.palavra[coluna];
-          const x = P + coluna * (C + G);
-          const yy = y + linha * (C + G);
-          ctx.fillStyle = cores[estado];
-          ctx.beginPath();
-          ctx.roundRect(x, yy, C, C, Math.max(5, C * 0.13));
-          ctx.fill();
-          ctx.fillStyle = corTextoCelula(estado);
-          ctx.font = 'bold 20px ' + getComputedStyle(document.documentElement).getPropertyValue('--fonte');
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(letra.toUpperCase(), x + C / 2, yy + C / 2 + 1);
-        }
-      }
-
-      y += nLinhas * (C + G) - G;
-      y += 12;
-
-      // Palavra completa
-      ctx.fillStyle = venceu ? cores.certa : cores.textoFraco;
-      ctx.font = 'bold 20px ' + getComputedStyle(document.documentElement).getPropertyValue('--fonte');
-      ctx.textAlign = 'center';
-      ctx.fillText(completa.toUpperCase(), W / 2, y + 20);
-      y += 30;
-
-      y += 8;
-
-      // Significado
-      if (info?.significado) {
-        ctx.fillStyle = cores.textoFraco;
-        ctx.font = '14px ' + getComputedStyle(document.documentElement).getPropertyValue('--fonte');
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        // Quebra simples de linha
-        const maximo = W - P * 2;
-        const palavras = info.significado.split(' ');
-        let linhaTexto = '';
-        let linhasTexto = [];
-        for (const palavra of palavras) {
-          const teste = (linhaTexto + ' ' + palavra).trim();
-          if (ctx.measureText(teste).width > maximo && linhaTexto !== '') {
-            linhasTexto.push(linhaTexto);
-            linhaTexto = palavra;
-          } else {
-            linhaTexto = teste;
-          }
-        }
-        if (linhaTexto !== '') linhasTexto.push(linhaTexto);
-        for (const l of linhasTexto) {
-          ctx.fillText(l, W / 2, y);
-          y += 16;
-        }
-        y += 4;
-      }
-
-      y += espacoTabuleiro / escala;
-    });
-
-    y -= espacoTabuleiro / escala;
-    y += P;
-
-    // Rodapé
-    ctx.fillStyle = cores.textoFraco;
-    ctx.font = '11px ' + getComputedStyle(document.documentElement).getPropertyValue('--fonte');
-    ctx.textAlign = 'center';
-    ctx.fillText('omret — descubra palavras de cinco letras', W / 2, y + 11);
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.scale(escala, escala);
+    desenharResultado(ctx, jogo, cores);
 
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) throw new Error('Falha ao gerar a imagem.');
     return blob;
   }
 
-  async function baixarImagem(blob, nome) {
+  function nomeImagem(jogo) {
+    return `omret-${jogo.modo}-${jogo.tipo === 'pratica' ? 'pratica-' : ''}${jogo.data.replace(/-/g, '')}.png`;
+  }
+
+  function baixarImagem(blob, nome) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -1222,35 +1222,44 @@
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   async function compartilhar() {
     const jogo = jogoAtual();
-    try {
-      const blob = await gerarImagemResultado(jogo);
-      const nome = `omret-${jogo.modo}-${jogo.data.replace(/-/g, '')}.png`;
 
-      if (navigator.share) {
+    // 1) Imagem pela folha de compartilhamento do sistema, se ela aceitar arquivos.
+    let blob = null;
+    try {
+      blob = await gerarImagemResultado(jogo);
+    } catch {
+      blob = null; // sem imagem: segue para o texto
+    }
+
+    if (blob && navigator.share && navigator.canShare) {
+      const arquivo = new File([blob], nomeImagem(jogo), { type: 'image/png' });
+      if (navigator.canShare({ files: [arquivo] })) {
         try {
-          const arquivo = new File([blob], nome, { type: 'image/png' });
           await navigator.share({ files: [arquivo], title: 'Resultado omret' });
-          avisar('Imagem compartilhada.');
+          avisar('Resultado compartilhado.');
           return;
-        } catch {
-          // compartilhamento de arquivo indisponível: tenta compartilhar texto
+        } catch (erro) {
+          // Usuário fechou a folha de compartilhamento: não faz mais nada.
+          if (erro && erro.name === 'AbortError') return;
         }
       }
+    }
 
+    // 2) Senão, copia a grade de emojis.
+    try {
       await copiarTexto(textoCompartilhar(jogo));
-      const original = el.btnCompartilhar.textContent;
       el.btnCompartilhar.textContent = 'Copiado!';
       avisar('Resultado copiado.');
       window.setTimeout(() => {
-        el.btnCompartilhar.textContent = original;
+        el.btnCompartilhar.textContent = 'Compartilhar';
       }, 1600);
     } catch {
-      avisar('Não foi possível gerar a imagem.');
+      avisar('Não foi possível compartilhar o resultado.');
     }
   }
 
@@ -1258,8 +1267,7 @@
     const jogo = jogoAtual();
     try {
       const blob = await gerarImagemResultado(jogo);
-      const nome = `omret-${jogo.modo}-${jogo.data.replace(/-/g, '')}.png`;
-      await baixarImagem(blob, nome);
+      baixarImagem(blob, nomeImagem(jogo));
       avisar('Imagem salva.');
     } catch {
       avisar('Não foi possível gerar a imagem.');
@@ -1295,32 +1303,41 @@
      ------------------------------------------------------------------------ */
 
   function confirmar(mensagem) {
-    let resolvido = false;
     return new Promise((resolve) => {
       el.confirmacaoMensagem.textContent = mensagem;
-      const finalizar = (ok) => {
-        if (resolvido) return;
-        resolvido = true;
+      let resultado = false;
+      const aoOk = () => {
+        resultado = true;
         el.dlgConfirmar.close();
-        resolve(ok);
       };
-      const okOk = () => finalizar(true);
-      const okCancelar = () => finalizar(false);
-      el.btnConfirmarOk.addEventListener('click', okOk, { once: true });
-      el.btnConfirmarCancelar.addEventListener('click', okCancelar, { once: true });
-      el.dlgConfirmar.addEventListener('close', () => {
-        if (!resolvido) finalizar(false);
-      }, { once: true });
+      const aoCancelar = () => el.dlgConfirmar.close();
+      // Toda saída (botões, Esc, clique fora) passa pelo evento close, que
+      // remove os ouvintes para não acumulá-los entre confirmações.
+      const aoFechar = () => {
+        el.btnConfirmarOk.removeEventListener('click', aoOk);
+        el.btnConfirmarCancelar.removeEventListener('click', aoCancelar);
+        resolve(resultado);
+      };
+      el.btnConfirmarOk.addEventListener('click', aoOk);
+      el.btnConfirmarCancelar.addEventListener('click', aoCancelar);
+      el.dlgConfirmar.addEventListener('close', aoFechar, { once: true });
       el.dlgConfirmar.showModal();
     });
   }
 
-  function entrarPratica() {
-    const modo = dados.modo;
-    if (dados.ativos[modo] === 'pratica') return;
-
-    dados.ativos[modo] = 'pratica';
+  // Liga ou desliga o modo prática em todas as modalidades, mantendo o
+  // switch, a modalidade atual e o que está salvo sempre de acordo.
+  function definirModoPratica(ligado) {
+    dados.modoPratica = ligado;
+    if (ligado) {
+      dados.ativos[dados.modo] = 'pratica';
+    } else {
+      Object.keys(MODOS).forEach((m) => {
+        dados.ativos[m] = 'diario';
+      });
+    }
     salvar();
+    fecharDialogos();
     renderizarTudo();
   }
 
@@ -1328,55 +1345,44 @@
     const modo = dados.modo;
     const atual = jogoAtual();
 
-    if (atual.tipo === 'pratica') {
-      // Uma prática recém-sorteada e ainda vazia é a rodada que já está
-      // em jogo; não vale a pena descartá-la.
-      if (statusJogo(atual) === 'jogando' && atual.palpites.length === 0) {
-        dados.ativos[modo] = 'pratica';
-        salvar();
-        fecharDialogos();
-        renderizarTudo();
-        return;
-      }
+    // No diário, o botão leva ao modo prática.
+    if (atual.tipo !== 'pratica') {
+      definirModoPratica(true);
+      avisar('Modo prática ativado.');
+      return;
+    }
 
-      if (
-        statusJogo(atual) === 'jogando'
-        && !(await confirmar('Começar uma nova prática? A rodada atual será substituída.'))
-      ) {
-        return;
-      }
-
-      dados.jogos[`${modo}:pratica`] = criarJogo(modo, 'pratica');
-      dados.ativos[modo] = 'pratica';
-      salvar();
-
+    // Uma prática recém-sorteada e ainda vazia já é uma rodada nova.
+    if (statusJogo(atual) === 'jogando' && atual.palpites.length === 0) {
       fecharDialogos();
-      renderizarTudo();
       avisar('Nova prática.');
       return;
     }
 
-    entrarPratica();
-    avisar('Modo prática iniciado.');
+    if (statusJogo(atual) === 'jogando') {
+      const ok = await confirmar('Começar uma nova prática? As palavras não resolvidas da rodada atual contam como erros.');
+      if (!ok) return;
+      // Abandonar conta no placar da prática, para não esconder derrotas.
+      contabilizar(atual, false);
+    }
+
+    if (resultadoPendente === atual) resultadoPendente = null;
+    dados.jogos[`${modo}:pratica`] = criarJogo(modo, 'pratica');
+    salvar();
+
+    fecharDialogos();
+    renderizarTudo();
+    avisar('Nova prática.');
   }
 
   function voltarAoDiario() {
-    dados.modoPratica = false;
-    // Retorna todos os modos ao diário, não apenas o atual.
-    Object.keys(MODOS).forEach((m) => {
-      if (dados.ativos[m]) dados.ativos[m] = 'diario';
-    });
-    salvar();
-    renderizarTudo();
-    el.btnModoPratica.setAttribute('aria-checked', String(dados.modoPratica));
+    definirModoPratica(false);
   }
 
   function trocarModo(modo) {
     if (!MODOS[modo] || modo === dados.modo) return;
     dados.modo = modo;
-    if (dados.modoPratica) {
-      dados.ativos[modo] = 'pratica';
-    }
+    dados.ativos[modo] = dados.modoPratica ? 'pratica' : 'diario';
     salvar();
     renderizarTudo();
   }
@@ -1468,8 +1474,17 @@
     });
 
     el.listaPalavras.appendChild(fragmento);
-    el.contagemBiblioteca.textContent = `${BIBLIOTECA.length} palavras de cinco letras.`;
-    el.btnBiblioteca.textContent = `Ver as ${BIBLIOTECA.length} palavras aceitas`;
+    el.contagemBiblioteca.textContent = textoContagemBiblioteca();
+    el.btnBiblioteca.textContent = 'Ver as palavras aceitas';
+  }
+
+  function formatarNumero(n) {
+    return n.toLocaleString('pt-BR');
+  }
+
+  function textoContagemBiblioteca() {
+    return `${formatarNumero(DICIONARIO.size)} palavras aceitas como palpite. `
+      + `A lista mostra as ${formatarNumero(BIBLIOTECA.length)} que têm significado.`;
   }
 
   function filtrarBiblioteca() {
@@ -1482,11 +1497,22 @@
       if (combina) visiveis += 1;
     });
 
-    el.contagemBiblioteca.textContent = termo
-      ? `${visiveis} de ${BIBLIOTECA.length} palavras.`
-      : `${BIBLIOTECA.length} palavras de cinco letras.`;
+    // Palavras que só valem como palpite não aparecem na lista (são muitas
+    // e não têm significado), mas a busca por uma palavra completa as confirma.
+    const soPalpite = termo.length === TAMANHO && DICIONARIO.has(termo) && !POR_PALAVRA.has(termo);
 
-    el.bibliotecaVazia.hidden = visiveis !== 0 || !termo;
+    if (!termo) {
+      el.contagemBiblioteca.textContent = textoContagemBiblioteca();
+    } else if (soPalpite) {
+      el.contagemBiblioteca.textContent = `“${termo}” é aceita como palpite, mas não tem significado cadastrado.`;
+    } else {
+      el.contagemBiblioteca.textContent = `${visiveis} de ${formatarNumero(BIBLIOTECA.length)} palavras com significado.`;
+    }
+
+    el.bibliotecaVazia.textContent = termo.length === TAMANHO
+      ? 'Essa palavra não é aceita.'
+      : 'Nenhuma palavra com significado encontrada.';
+    el.bibliotecaVazia.hidden = visiveis !== 0 || !termo || soPalpite;
   }
 
   function abrirBiblioteca() {
@@ -1531,9 +1557,7 @@
     if (agora === diaAtual) return;
     diaAtual = agora;
 
-    if (dados.ativos[dados.modo] !== 'pratica' && dados.ativos[dados.modo] !== 'livre') {
-      renderizarTudo();
-    }
+    if (dados.ativos[dados.modo] !== 'pratica') renderizarTudo();
   }
 
   /* ------------------------------------------------------------------------
@@ -1547,18 +1571,9 @@
 
     el.btnNovo.addEventListener('click', novaRodada);
     el.btnModoPratica.addEventListener('click', () => {
-      const novoEstado = !dados.modoPratica;
-      dados.modoPratica = novoEstado;
-      el.btnModoPratica.setAttribute('aria-checked', String(novoEstado));
-      salvar();
-
-      if (novoEstado) {
-        entrarPratica();
-        avisar('Modo prática ativado.');
-      } else {
-        voltarAoDiario();
-        avisar('Modo prática desativado.');
-      }
+      const ligado = !dados.modoPratica;
+      definirModoPratica(ligado);
+      avisar(ligado ? 'Modo prática ativado.' : 'Modo prática desativado.');
     });
     el.btnDiario.addEventListener('click', voltarAoDiario);
     el.btnVerResultado.addEventListener('click', () => abrirResultado(jogoAtual()));
@@ -1571,13 +1586,9 @@
     el.btnNovoResultado.addEventListener('click', () => {
       const eraPratica = jogoAtual().tipo === 'pratica';
       fecharDialogos();
-
-      if (eraPratica) {
-        const jogo = dados.jogos[`${dados.modo}:pratica`];
-        if (jogo && statusJogo(jogo) !== 'jogando') renderizarTudo();
-      } else {
-        novaRodada();
-      }
+      // Na prática, fechar o resultado já sorteia a próxima rodada.
+      if (eraPratica) renderizarTudo();
+      else novaRodada();
     });
 
     el.btnEstatisticas.addEventListener('click', () => {
@@ -1683,6 +1694,11 @@
     });
 
     window.setInterval(verificarDia, 60000);
+
+    // Sem tema escolhido, acompanha o sistema também durante o uso.
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (evento) => {
+      if (!dados.tema) aplicarTema(evento.matches ? 'escuro' : 'claro');
+    });
   }
 
   /* ------------------------------------------------------------------------
@@ -1698,7 +1714,6 @@
     aplicarTema(temaInicial());
     construirTeclado();
     ligarEventos();
-    el.btnModoPratica.setAttribute('aria-checked', String(dados.modoPratica === true));
     montarBiblioteca();
     renderizarTudo();
     diaAtual = hoje();
